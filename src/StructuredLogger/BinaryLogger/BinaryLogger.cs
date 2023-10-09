@@ -61,7 +61,10 @@ namespace Microsoft.Build.Logging.StructuredLogger
         //   - AssemblyLoadBuildEventArgs
         // version 17:
         //   - Added extended data for types implementing IExtendedBuildEventArgs
-        internal const int FileFormatVersion = 17;
+        // version 18:
+        //   - Making ProjectStartedEventArgs, ProjectEvaluationFinishedEventArgs, AssemblyLoadBuildEventArgs equal
+        //     between de/serialization roundtrips.
+        internal const int FileFormatVersion = 18;
 
         public static bool IsNewerVersionAvailable { get; set; }
 

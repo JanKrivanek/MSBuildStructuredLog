@@ -462,11 +462,12 @@ namespace Microsoft.Build.Logging.StructuredLogger
 
             if (fileFormatVersion >= 12)
             {
-                IEnumerable globalProperties = null;
-                if (ReadBoolean())
+                if (fileFormatVersion < 18)
                 {
-                    globalProperties = ReadStringDictionary();
+                    // Throw away, but need to advance past it
+                    ReadBoolean();
                 }
+                IEnumerable? globalProperties = ReadStringDictionary();
 
                 var propertyList = ReadPropertyList();
                 var itemList = ReadProjectItems();
@@ -517,10 +518,12 @@ namespace Microsoft.Build.Logging.StructuredLogger
 
             if (fileFormatVersion > 6)
             {
-                if (ReadBoolean())
+                if (fileFormatVersion < 18)
                 {
-                    globalProperties = ReadStringDictionary();
+                    // Throw away, but need to advance past it
+                    ReadBoolean();
                 }
+                globalProperties = ReadStringDictionary();
             }
 
             var propertyList = ReadPropertyList();
