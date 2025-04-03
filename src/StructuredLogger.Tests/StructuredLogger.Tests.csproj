@@ -7,6 +7,8 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="DiffPlex" />
+    <PackageReference Include="Moq" />
+    <PackageReference Include="System.IO.Compression" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="System.Collections.Immutable" />
