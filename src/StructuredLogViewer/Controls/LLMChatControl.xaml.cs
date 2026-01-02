@@ -140,15 +140,22 @@ namespace StructuredLogViewer.Controls
             // Load configuration
             currentConfig = LLMConfiguration.LoadFromEnvironment();
             
-            // Create agentic service
+            // Create agentic service (pass null for now, will share client after initialization)
             if (currentConfig.IsConfigured)
             {
-                agenticChatService = new AgenticLLMChatService(build, buildControl, currentConfig);
+                agenticChatService = new AgenticLLMChatService(build, buildControl, currentConfig, null);
                 agenticChatService.ProgressUpdated += OnAgentProgressUpdated;
                 agenticChatService.MessageAdded += OnMessageAdded;
                 agenticChatService.ToolCallExecuting += OnToolCallExecuting;
                 agenticChatService.ToolCallExecuted += OnToolCallExecuted;
                 agenticChatService.RequestRetrying += OnRequestRetrying;
+                
+                // Only initialize non-GitHub Copilot providers automatically
+                // GitHub Copilot requires explicit user action via Configure dialog
+                if (currentConfig.Type != LLMConfiguration.ClientType.GitHubCopilot)
+                {
+                    _ = InitializeServicesAsync();
+                }
             }
 
             // Initialize agent mode toggle from config (default is true)
@@ -165,15 +172,31 @@ namespace StructuredLogViewer.Controls
             }
             else
             {
+                var configMessage = "LLM is not configured. ";
+                
+                // Check if GitHub Copilot is detected
+                if (currentConfig?.Type == LLMConfiguration.ClientType.GitHubCopilot)
+                {
+                    configMessage += "GitHub Copilot detected!\n\n" +
+                                   "When you send your first message, you'll be prompted to authenticate with GitHub.\n\n" +
+                                   "Current settings:\n" +
+                                   $"• Model: {currentConfig.ModelName ?? "Not set"}\n\n" +
+                                   "To complete setup, ensure LLM_MODEL is set (e.g., gpt-4).";
+                }
+                else
+                {
+                    configMessage += "Set these environment variables:\n\n" +
+                                   "• LLM_ENDPOINT (e.g., https://your-resource.openai.azure.com/ or 'github-copilot')\n" +
+                                   "• LLM_API_KEY (your API key, optional for GitHub Copilot)\n" +
+                                   "• LLM_MODEL (e.g., gpt-4, claude-sonnet-4-5-2)\n\n" +
+                                   "The system will automatically detect the provider.\n" +
+                                   "Restart the application after setting these variables.";
+                }
+                
                 AddMessage(new ChatMessageDisplay
                 {
                     Role = "System",
-                    Content = "LLM is not configured. Set these environment variables:\n\n" +
-                            "• LLM_ENDPOINT (e.g., https://your-resource.openai.azure.com/)\n" +
-                            "• LLM_API_KEY (your API key)\n" +
-                            "• LLM_MODEL (e.g., gpt-4, claude-sonnet-4-5-2)\n\n" +
-                            "The system will automatically detect the provider.\n" +
-                            "Restart the application after setting these variables.",
+                    Content = configMessage,
                     IsError = true
                 });
                 sendButton.IsEnabled = false;
@@ -184,6 +207,32 @@ namespace StructuredLogViewer.Controls
         public void SetSelectedNode(BaseNode node)
         {
             chatService?.SetSelectedNode(node);
+        }
+
+        private async System.Threading.Tasks.Task InitializeServicesAsync()
+        {
+            try
+            {
+                // Initialize chat service
+                if (chatService != null)
+                {
+                    await chatService.InitializeAsync();
+                }
+
+                // Share the initialized client with agentic service
+                if (agenticChatService != null && chatService?.LLMClient != null)
+                {
+                    await agenticChatService.SetSharedClientAsync(chatService.LLMClient);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Failed to initialize services: {ex.Message}");
+                Dispatcher.Invoke(() =>
+                {
+                    ShowStatus($"Initialization failed: {ex.Message}", isError: true);
+                });
+            }
         }
 
         private void AddWelcomeMessage()
@@ -383,16 +432,27 @@ namespace StructuredLogViewer.Controls
                 // Reconfigure with current config if available
                 if (currentConfig != null)
                 {
-                    chatService.Reconfigure(currentConfig);
+                    _ = chatService.ReconfigureAsync(currentConfig);
                 }
                 
                 // Recreate agentic service if configured
                 if (currentConfig?.IsConfigured == true)
                 {
-                    agenticChatService = new AgenticLLMChatService(Build, BuildControl, currentConfig);
+                    agenticChatService = new AgenticLLMChatService(Build, BuildControl, currentConfig, null);
                     agenticChatService.ProgressUpdated += OnAgentProgressUpdated;
                     agenticChatService.MessageAdded += OnMessageAdded;
                     agenticChatService.ToolCallExecuted += OnToolCallExecuted;
+                    
+                    // Share the client after reconfiguration completes (fire and forget)
+                    _ = System.Threading.Tasks.Task.Run(async () =>
+                    {
+                        // Wait a bit for reconfiguration to complete
+                        await System.Threading.Tasks.Task.Delay(100);
+                        if (chatService?.LLMClient != null)
+                        {
+                            await agenticChatService.SetSharedClientAsync(chatService.LLMClient);
+                        }
+                    });
                 }
             }
             
@@ -440,7 +500,50 @@ namespace StructuredLogViewer.Controls
             if (chatService == null || !chatService.IsConfigured)
             {
                 ShowStatus("LLM is not configured", isError: true);
+                MessageBox.Show(
+                    "Please use the Configure dialog (gear icon) to set up your LLM connection.",
+                    "LLM Not Configured",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
                 return;
+            }
+
+            // Check if GitHub Copilot needs initialization
+            if (currentConfig?.Type == LLMConfiguration.ClientType.GitHubCopilot)
+            {
+                // Try to initialize if not already done
+                try
+                {
+                    await chatService.InitializeAsync();
+                    
+                    // Share the initialized client with agentic service
+                    if (agenticChatService != null && chatService.LLMClient != null)
+                    {
+                        await agenticChatService.SetSharedClientAsync(chatService.LLMClient);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ShowStatus($"Failed to initialize GitHub Copilot: {ex.Message}", isError: true);
+                    MessageBox.Show(
+                        $"Please use the Configure dialog to authenticate with GitHub Copilot.\n\nError: {ex.Message}",
+                        "GitHub Copilot Not Configured",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning);
+                    return;
+                }
+
+                // Verify client is ready after initialization
+                if (!chatService.IsClientReady)
+                {
+                    ShowStatus("LLM client failed to initialize", isError: true);
+                    MessageBox.Show(
+                        "The LLM client failed to initialize properly. Please try configuring again.",
+                        "Initialization Failed",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Error);
+                    return;
+                }
             }
 
             var message = inputTextBox.Text?.Trim();
@@ -572,7 +675,7 @@ namespace StructuredLogViewer.Controls
                 : "Interactive Mode: Single-turn conversations (click to enable agent mode)";
         }
 
-        private void ConfigureButton_Click(object sender, RoutedEventArgs e)
+        private async void ConfigureButton_Click(object sender, RoutedEventArgs e)
         {
             // Get current configuration
             var configForDialog = this.currentConfig ?? LLMConfiguration.LoadFromEnvironment();
@@ -616,22 +719,32 @@ namespace StructuredLogViewer.Controls
                         AgentMode = dialog.AgentMode
                     };
 
-                    // Reconfigure the service (keeps chat history)
-                    chatService?.Reconfigure(newConfig);
+                    // Reconfigure the service (keeps chat history) and await initialization
+                    if (chatService != null)
+                    {
+                        ShowStatus("Initializing LLM client...");
+                        await chatService.ReconfigureAsync(newConfig);
+                    }
                     
                     // Update current config reference
                     currentConfig = newConfig;
                     
-                    // Reinitialize agentic service with new config
+                    // Reinitialize agentic service with new config and share the client
                     agenticChatService?.Dispose();
                     if (newConfig.IsConfigured && Build != null && BuildControl != null)
                     {
-                        agenticChatService = new AgenticLLMChatService(Build, BuildControl, newConfig);
+                        agenticChatService = new AgenticLLMChatService(Build, BuildControl, newConfig, null);
                         agenticChatService.ProgressUpdated += OnAgentProgressUpdated;
                         agenticChatService.MessageAdded += OnMessageAdded;
                         agenticChatService.ToolCallExecuting += OnToolCallExecuting;
                         agenticChatService.ToolCallExecuted += OnToolCallExecuted;
                         agentModeToggle.IsEnabled = true;
+                        
+                        // Share the initialized client from chatService
+                        if (chatService?.LLMClient != null)
+                        {
+                            await agenticChatService.SetSharedClientAsync(chatService.LLMClient);
+                        }
                     }
                     
                     // Update agent mode toggle UI to match new config

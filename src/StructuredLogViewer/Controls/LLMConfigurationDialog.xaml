@@ -36,19 +36,31 @@
                        FontWeight="Bold" 
                        Margin="0,0,0,4"
                        Foreground="{DynamicResource Theme_Foreground}"/>
-            <TextBox x:Name="modelTextBox"
+            <ComboBox x:Name="modelComboBox"
                      Padding="4"
-                     ToolTip="E.g., gpt-4, claude-sonnet-4-5-2"
+                     IsEditable="True"
+                     ToolTip="Select or enter a model name"
                      Background="{DynamicResource Theme_Background}"
                      Foreground="{DynamicResource Theme_Foreground}"/>
         </StackPanel>
 
         <!-- API Key -->
         <StackPanel Grid.Row="2" Margin="0,0,0,12">
-            <TextBlock Text="API Key" 
-                       FontWeight="Bold" 
-                       Margin="0,0,0,4"
-                       Foreground="{DynamicResource Theme_Foreground}"/>
+            <DockPanel Margin="0,0,0,4">
+                <Button x:Name="githubLoginButton"
+                        DockPanel.Dock="Right"
+                        Content="🔑 GitHub Login"
+                        Click="GitHubLoginButton_Click"
+                        Padding="8,2"
+                        Margin="4,0,0,0"
+                        ToolTip="Authenticate with GitHub Copilot (OAuth)"
+                        Background="{DynamicResource Theme_Background}"
+                        Foreground="{DynamicResource Theme_Foreground}"/>
+                <TextBlock Text="API Key" 
+                           FontWeight="Bold"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource Theme_Foreground}"/>
+            </DockPanel>
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />

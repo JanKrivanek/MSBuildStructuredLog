@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.AI;
 using StructuredLogViewer.Controls;
+using StructuredLogViewer.Dialogs;
 
 namespace StructuredLogViewer.LLM
 {
@@ -21,8 +22,9 @@ namespace StructuredLogViewer.LLM
         private readonly AsyncBinlogToolExecutor toolExecutor;
         private readonly AsyncBinlogUIInteractionExecutor uiInteractionExecutor;
         private readonly AsyncEmbeddedFilesToolExecutor embeddedFilesExecutor;
-        private readonly AzureFoundryLLMClient llmClient;
+        private AzureFoundryLLMClient llmClient;
         private readonly LLMConfiguration configuration;
+        private readonly bool ownsClient;
 
         public event EventHandler<AgentProgressEventArgs> ProgressUpdated;
         public event EventHandler<ChatMessageViewModel> MessageAdded;
@@ -31,12 +33,13 @@ namespace StructuredLogViewer.LLM
         public event EventHandler<ResilienceEventArgs> RequestRetrying;
 
         public bool IsConfigured => configuration?.IsConfigured ?? false;
+        public bool IsClientReady => llmClient?.ChatClient != null;
 
         // Configuration
         public int MaxResearchTasks { get; set; } = 5;
         public int MaxTokensPerTask { get; set; } = 4000;
 
-        public AgenticLLMChatService(Microsoft.Build.Logging.StructuredLogger.Build build, BuildControl buildControl, LLMConfiguration config)
+        public AgenticLLMChatService(Microsoft.Build.Logging.StructuredLogger.Build build, BuildControl buildControl, LLMConfiguration config, AzureFoundryLLMClient sharedClient = null)
         {
             this.build = build ?? throw new ArgumentNullException(nameof(build));
             this.contextProvider = new BinlogContextProvider(build);
@@ -44,16 +47,82 @@ namespace StructuredLogViewer.LLM
             this.uiInteractionExecutor = buildControl != null ? new AsyncBinlogUIInteractionExecutor(build, buildControl) : null;
             this.embeddedFilesExecutor = new AsyncEmbeddedFilesToolExecutor(build);
             this.configuration = config ?? throw new ArgumentNullException(nameof(config));
+            this.llmClient = sharedClient; // Use shared client if provided
+            this.ownsClient = sharedClient == null; // Only dispose if we created it
+
+            // Don't auto-initialize - will be initialized when LLMChatService initializes
+        }
+
+        /// <summary>
+        /// Sets a shared LLM client from another service (preferred for GitHub Copilot to avoid duplicate auth).
+        /// </summary>
+        public async System.Threading.Tasks.Task SetSharedClientAsync(AzureFoundryLLMClient sharedClient)
+        {
+            if (sharedClient == null)
+                throw new ArgumentNullException(nameof(sharedClient));
+                
+            // Don't dispose the old client if we're sharing
+            llmClient = sharedClient;
+            
+            // Subscribe to resilience events if available
+            if (llmClient.ResilientClient != null)
+            {
+                llmClient.ResilientClient.RequestRetrying += (sender, e) => RequestRetrying?.Invoke(this, e);
+            }
+            
+            await System.Threading.Tasks.Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Initializes the LLM client. Call this explicitly after construction.
+        /// </summary>
+        public async System.Threading.Tasks.Task InitializeAsync()
+        {
+            if (llmClient != null)
+            {
+                return; // Already initialized
+            }
 
             if (configuration.IsConfigured)
             {
-                llmClient = new AzureFoundryLLMClient(configuration);
+                await InitializeClientAsync();
+            }
+        }
+
+        private async System.Threading.Tasks.Task InitializeClientAsync()
+        {
+            try
+            {
+                // Create device code callback for GitHub Copilot
+                Action<string, string> deviceCodeCallback = null;
+                if (configuration.Type == LLMConfiguration.ClientType.GitHubCopilot)
+                {
+                    deviceCodeCallback = (userCode, verificationUrl) =>
+                    {
+                        // Must be invoked on UI thread
+                        System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+                        {
+                            var dialog = new GitHubDeviceCodeDialog(userCode, verificationUrl);
+                            dialog.Owner = System.Windows.Application.Current?.MainWindow;
+                            dialog.Show();
+                        });
+                    };
+                }
+
+                llmClient = new AzureFoundryLLMClient(configuration, deviceCodeCallback);
+                
+                // Perform async initialization (required for GitHub Copilot)
+                await llmClient.InitializeAsync();
                 
                 // Subscribe to resilience events
                 if (llmClient.ResilientClient != null)
                 {
                     llmClient.ResilientClient.RequestRetrying += (sender, e) => RequestRetrying?.Invoke(this, e);
                 }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Failed to initialize LLM client in AgenticLLMChatService: {ex.Message}");
             }
         }
 
@@ -65,6 +134,11 @@ namespace StructuredLogViewer.LLM
             if (!IsConfigured)
             {
                 return "LLM is not configured. Please configure the LLM settings.";
+            }
+
+            if (!IsClientReady)
+            {
+                return "LLM client is not initialized. Please ensure the client was properly configured and initialized.";
             }
 
             var plan = new AgentPlan(userQuery);
@@ -612,7 +686,11 @@ Use UI tools to enhance the user experience by showing them relevant parts of th
 
         public void Dispose()
         {
-            llmClient?.Dispose();
+            // Only dispose if we own the client (not shared)
+            if (ownsClient)
+            {
+                llmClient?.Dispose();
+            }
         }
     }
 }

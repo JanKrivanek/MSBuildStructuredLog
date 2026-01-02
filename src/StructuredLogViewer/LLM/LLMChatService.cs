@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Microsoft.Build.Logging.StructuredLogger;
 using Microsoft.Extensions.AI;
 using StructuredLogViewer.Controls;
+using StructuredLogViewer.Dialogs;
 
 namespace StructuredLogViewer.LLM
 {
@@ -43,6 +44,7 @@ namespace StructuredLogViewer.LLM
         private readonly LLMConfiguration configuration;
         private readonly List<ChatMessage> chatHistory;
         private BaseNode currentSelectedNode;
+        private GitHubDeviceCodeDialog deviceCodeDialog;
 
         // Token management settings
         private const int MaxPromptTokens = 180000; // Leave buffer below 200k limit
@@ -56,7 +58,13 @@ namespace StructuredLogViewer.LLM
         public event EventHandler<ResilienceEventArgs> RequestRetrying;
 
         public bool IsConfigured => configuration?.IsConfigured ?? false;
+        public bool IsClientReady => llmClient?.ChatClient != null;
         public string ConfigurationStatus => configuration?.GetConfigurationStatus() ?? "Not initialized";
+        
+        /// <summary>
+        /// Gets the LLM client. Used to share client with AgenticLLMChatService.
+        /// </summary>
+        public AzureFoundryLLMClient LLMClient => llmClient;
 
         public LLMChatService(Build build, BuildControl buildControl)
         {
@@ -68,26 +76,76 @@ namespace StructuredLogViewer.LLM
             this.chatHistory = new List<ChatMessage>();
             this.configuration = LLMConfiguration.LoadFromEnvironment();
 
-            InitializeLLMClient();
+            // Don't auto-initialize - wait for explicit user action
         }
 
-        private void InitializeLLMClient()
+        /// <summary>
+        /// Initializes the LLM client. Call this explicitly after construction.
+        /// </summary>
+        public async System.Threading.Tasks.Task InitializeAsync()
+        {
+            if (llmClient != null)
+            {
+                return; // Already initialized
+            }
+
+            await InitializeLLMClientAsync();
+        }
+
+        private async System.Threading.Tasks.Task InitializeLLMClientAsync()
         {
             if (configuration.IsConfigured)
             {
                 try
                 {
-                    llmClient = new AzureFoundryLLMClient(configuration);
+                    // Create device code callback for GitHub Copilot
+                    Action<string, string> deviceCodeCallback = null;
+                    if (configuration.Type == LLMConfiguration.ClientType.GitHubCopilot)
+                    {
+                        deviceCodeCallback = (userCode, verificationUrl) =>
+                        {
+                            // Must be invoked on UI thread
+                            System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+                            {
+                                deviceCodeDialog = new GitHubDeviceCodeDialog(userCode, verificationUrl);
+                                deviceCodeDialog.Owner = System.Windows.Application.Current?.MainWindow;
+                                deviceCodeDialog.Show();
+                            });
+                        };
+                    }
+
+                    llmClient = new AzureFoundryLLMClient(configuration, deviceCodeCallback);
+                    
+                    // Perform async initialization (required for GitHub Copilot)
+                    await llmClient.InitializeAsync();
                     
                     // Subscribe to resilience events
                     if (llmClient.ResilientClient != null)
                     {
                         llmClient.ResilientClient.RequestRetrying += (sender, e) => RequestRetrying?.Invoke(this, e);
                     }
+
+                    // Close device code dialog on successful initialization
+                    if (deviceCodeDialog != null && configuration.Type == LLMConfiguration.ClientType.GitHubCopilot)
+                    {
+                        System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+                        {
+                            deviceCodeDialog?.CloseWithSuccess();
+                        });
+                    }
                 }
                 catch (Exception ex)
                 {
                     System.Diagnostics.Debug.WriteLine($"Failed to initialize LLM client: {ex.Message}");
+                    
+                    // Close device code dialog with error
+                    if (deviceCodeDialog != null)
+                    {
+                        System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+                        {
+                            deviceCodeDialog?.CloseWithError(ex.Message);
+                        });
+                    }
                 }
             }
         }
@@ -108,7 +166,7 @@ namespace StructuredLogViewer.LLM
             return configuration;
         }
 
-        public void Reconfigure(LLMConfiguration newConfig)
+        public async System.Threading.Tasks.Task ReconfigureAsync(LLMConfiguration newConfig)
         {
             if (newConfig == null)
                 throw new ArgumentNullException(nameof(newConfig));
@@ -122,10 +180,11 @@ namespace StructuredLogViewer.LLM
             configuration.UpdateType();
 
             // Dispose old client
+            llmClient?.Dispose();
             llmClient = null;
 
             // Reinitialize with new settings
-            InitializeLLMClient();
+            await InitializeLLMClientAsync();
 
             // Keep chat history - don't clear
         }
@@ -242,6 +301,13 @@ Available context:
                              "- LLM_API_KEY (your API key)\n" +
                              "- LLM_MODEL (model name, e.g., gpt-4)";
                 
+                MessageAdded?.Invoke(this, new ChatMessageViewModel("System", errorMsg, isError: true));
+                return errorMsg;
+            }
+
+            if (!IsClientReady)
+            {
+                var errorMsg = "LLM client is not initialized. Please ensure the client was properly configured and initialized.";
                 MessageAdded?.Invoke(this, new ChatMessageViewModel("System", errorMsg, isError: true));
                 return errorMsg;
             }
